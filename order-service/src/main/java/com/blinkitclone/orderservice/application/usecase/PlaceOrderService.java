@@ -1,6 +1,7 @@
 package com.blinkitclone.orderservice.application.usecase;
 
 import com.blinkitclone.orderservice.application.port.in.PlaceOrderUseCase;
+import com.blinkitclone.orderservice.application.port.out.OrderEventPublisher;
 import com.blinkitclone.orderservice.application.port.out.OrderRepository;
 import com.blinkitclone.orderservice.domain.model.Money;
 import com.blinkitclone.orderservice.domain.model.Order;
@@ -32,9 +33,11 @@ public class PlaceOrderService implements PlaceOrderUseCase {
     private static final String DEFAULT_CURRENCY = "INR";
 
     private final OrderRepository orderRepository;
+    private final OrderEventPublisher orderEventPublisher;
 
-    public PlaceOrderService(OrderRepository orderRepository) {
+    public PlaceOrderService(OrderRepository orderRepository, OrderEventPublisher orderEventPublisher) {
         this.orderRepository = orderRepository;
+        this.orderEventPublisher = orderEventPublisher;
     }
 
     @Override
@@ -46,6 +49,7 @@ public class PlaceOrderService implements PlaceOrderUseCase {
 
         Order order = Order.place(command.customerId(), items);
         Order saved = orderRepository.save(order);
+        orderEventPublisher.publishOrderCreated(saved);
 
         Money total = saved.totalAmount();
         return new PlaceOrderResult(

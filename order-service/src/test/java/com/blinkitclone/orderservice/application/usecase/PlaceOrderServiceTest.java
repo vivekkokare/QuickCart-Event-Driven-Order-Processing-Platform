@@ -3,12 +3,14 @@ package com.blinkitclone.orderservice.application.usecase;
 import com.blinkitclone.orderservice.application.port.in.PlaceOrderUseCase.PlaceOrderCommand;
 import com.blinkitclone.orderservice.application.port.in.PlaceOrderUseCase.PlaceOrderCommand.OrderItemCommand;
 import com.blinkitclone.orderservice.application.port.in.PlaceOrderUseCase.PlaceOrderResult;
+import com.blinkitclone.orderservice.application.port.out.OrderEventPublisher;
 import com.blinkitclone.orderservice.application.port.out.OrderRepository;
 import com.blinkitclone.orderservice.domain.model.Order;
 import com.blinkitclone.orderservice.domain.model.OrderId;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,7 +31,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class PlaceOrderServiceTest {
 
     private final InMemoryOrderRepository repository = new InMemoryOrderRepository();
-    private final PlaceOrderService service = new PlaceOrderService(repository);
+    private final RecordingOrderEventPublisher eventPublisher = new RecordingOrderEventPublisher();
+    private final PlaceOrderService service = new PlaceOrderService(repository, eventPublisher);
 
     @Test
     void placingAnOrderPersistsItAndReturnsComputedTotal() {
@@ -46,6 +49,28 @@ class PlaceOrderServiceTest {
         assertThat(result.totalAmount()).isEqualTo(new BigDecimal("150.00"));
         assertThat(result.currency()).isEqualTo("INR");
         assertThat(repository.findById(OrderId.of(result.orderId()))).isPresent();
+    }
+
+    @Test
+    void placingAnOrderPublishesExactlyOneOrderCreatedEvent() {
+        PlaceOrderCommand command = new PlaceOrderCommand(
+                UUID.randomUUID(),
+                List.of(new OrderItemCommand(UUID.randomUUID(), "Milk 1L", 1, new BigDecimal("55.00"))));
+
+        PlaceOrderResult result = service.placeOrder(command);
+
+        assertThat(eventPublisher.publishedOrders).hasSize(1);
+        assertThat(eventPublisher.publishedOrders.get(0).id().value()).isEqualTo(result.orderId());
+    }
+
+    /** A minimal fake satisfying the OrderEventPublisher port, recording calls instead of touching RabbitMQ. */
+    private static final class RecordingOrderEventPublisher implements OrderEventPublisher {
+        private final List<Order> publishedOrders = new ArrayList<>();
+
+        @Override
+        public void publishOrderCreated(Order order) {
+            publishedOrders.add(order);
+        }
     }
 
     /** A minimal fake satisfying the OrderRepository port, backed by a Map instead of a database. */
