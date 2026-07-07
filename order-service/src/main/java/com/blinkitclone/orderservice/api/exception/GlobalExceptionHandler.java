@@ -2,6 +2,7 @@ package com.blinkitclone.orderservice.api.exception;
 
 import com.blinkitclone.orderservice.domain.exception.EmptyOrderException;
 import com.blinkitclone.orderservice.domain.exception.InvalidOrderStateTransitionException;
+import com.blinkitclone.orderservice.domain.exception.StockUnavailableException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -29,6 +30,11 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(EmptyOrderException.class)
     public ResponseEntity<ApiError> handleEmptyOrder(EmptyOrderException ex) {
         return build(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
+    @ExceptionHandler(StockUnavailableException.class)
+    public ResponseEntity<ApiError> handleStockUnavailable(StockUnavailableException ex) {
+        return build(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

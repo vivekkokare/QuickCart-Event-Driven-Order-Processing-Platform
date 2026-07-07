@@ -3,6 +3,8 @@ package com.blinkitclone.orderservice.application.usecase;
 import com.blinkitclone.orderservice.application.port.in.PlaceOrderUseCase;
 import com.blinkitclone.orderservice.application.port.out.OrderEventPublisher;
 import com.blinkitclone.orderservice.application.port.out.OrderRepository;
+import com.blinkitclone.orderservice.application.port.out.StockAvailabilityPort;
+import com.blinkitclone.orderservice.domain.exception.StockUnavailableException;
 import com.blinkitclone.orderservice.domain.model.Money;
 import com.blinkitclone.orderservice.domain.model.Order;
 import com.blinkitclone.orderservice.domain.model.OrderItem;
@@ -34,15 +36,29 @@ public class PlaceOrderService implements PlaceOrderUseCase {
 
     private final OrderRepository orderRepository;
     private final OrderEventPublisher orderEventPublisher;
+    private final StockAvailabilityPort stockAvailabilityPort;
 
-    public PlaceOrderService(OrderRepository orderRepository, OrderEventPublisher orderEventPublisher) {
+    public PlaceOrderService(OrderRepository orderRepository,
+                             OrderEventPublisher orderEventPublisher,
+                             StockAvailabilityPort stockAvailabilityPort) {
         this.orderRepository = orderRepository;
         this.orderEventPublisher = orderEventPublisher;
+        this.stockAvailabilityPort = stockAvailabilityPort;
     }
 
     @Override
     @Transactional
     public PlaceOrderResult placeOrder(PlaceOrderCommand command) {
+        // Optimistic pre-flight check: fail fast on obvious stock shortages.
+        // The circuit breaker in StockAvailabilityPort's implementation returns
+        // true when inventory-service is unreachable, so this never blocks order
+        // intake during an inventory outage.
+        for (PlaceOrderCommand.OrderItemCommand item : command.items()) {
+            if (!stockAvailabilityPort.isStockAvailable(item.productId(), item.quantity())) {
+                throw new StockUnavailableException(item.productId(), item.quantity());
+            }
+        }
+
         List<OrderItem> items = command.items().stream()
                 .map(this::toDomainItem)
                 .toList();

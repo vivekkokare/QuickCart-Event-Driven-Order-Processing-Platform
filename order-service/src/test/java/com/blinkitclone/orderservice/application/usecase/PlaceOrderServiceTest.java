@@ -5,6 +5,8 @@ import com.blinkitclone.orderservice.application.port.in.PlaceOrderUseCase.Place
 import com.blinkitclone.orderservice.application.port.in.PlaceOrderUseCase.PlaceOrderResult;
 import com.blinkitclone.orderservice.application.port.out.OrderEventPublisher;
 import com.blinkitclone.orderservice.application.port.out.OrderRepository;
+import com.blinkitclone.orderservice.application.port.out.StockAvailabilityPort;
+import com.blinkitclone.orderservice.domain.exception.StockUnavailableException;
 import com.blinkitclone.orderservice.domain.model.Order;
 import com.blinkitclone.orderservice.domain.model.OrderId;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Tests PlaceOrderService against an in-memory fake of the OrderRepository
@@ -32,7 +35,8 @@ class PlaceOrderServiceTest {
 
     private final InMemoryOrderRepository repository = new InMemoryOrderRepository();
     private final RecordingOrderEventPublisher eventPublisher = new RecordingOrderEventPublisher();
-    private final PlaceOrderService service = new PlaceOrderService(repository, eventPublisher);
+    private final AlwaysAvailableStockPort stockPort = new AlwaysAvailableStockPort();
+    private final PlaceOrderService service = new PlaceOrderService(repository, eventPublisher, stockPort);
 
     @Test
     void placingAnOrderPersistsItAndReturnsComputedTotal() {
@@ -63,6 +67,39 @@ class PlaceOrderServiceTest {
         assertThat(eventPublisher.publishedOrders.get(0).id().value()).isEqualTo(result.orderId());
     }
 
+    @Test
+    void orderIsRejectedImmediatelyWhenStockCheckReturnsFalse() {
+        PlaceOrderService serviceWithUnavailableStock =
+                new PlaceOrderService(repository, eventPublisher, new NeverAvailableStockPort());
+
+        UUID productId = UUID.randomUUID();
+        PlaceOrderCommand command = new PlaceOrderCommand(
+                UUID.randomUUID(),
+                List.of(new OrderItemCommand(productId, "Milk 1L", 3, new BigDecimal("55.00"))));
+
+        assertThatThrownBy(() -> serviceWithUnavailableStock.placeOrder(command))
+                .isInstanceOf(StockUnavailableException.class)
+                .hasMessageContaining(productId.toString());
+
+        assertThat(repository.store).isEmpty();
+        assertThat(eventPublisher.publishedOrders).isEmpty();
+    }
+
+    @Test
+    void orderProceeds_whenStockPortReturnsTrue_evenForCircuitBreakerFallback() {
+        // The optimistic fallback (circuit open → return true) must not block orders.
+        // This test proves the service accepts an order when the port returns true,
+        // regardless of whether that 'true' came from a real check or a fallback.
+        PlaceOrderCommand command = new PlaceOrderCommand(
+                UUID.randomUUID(),
+                List.of(new OrderItemCommand(UUID.randomUUID(), "Bread", 1, new BigDecimal("40.00"))));
+
+        PlaceOrderResult result = service.placeOrder(command);
+
+        assertThat(result.status()).isEqualTo("CREATED");
+        assertThat(repository.store).hasSize(1);
+    }
+
     /** A minimal fake satisfying the OrderEventPublisher port, recording calls instead of touching RabbitMQ. */
     private static final class RecordingOrderEventPublisher implements OrderEventPublisher {
         private final List<Order> publishedOrders = new ArrayList<>();
@@ -73,9 +110,23 @@ class PlaceOrderServiceTest {
         }
     }
 
+    private static final class AlwaysAvailableStockPort implements StockAvailabilityPort {
+        @Override
+        public boolean isStockAvailable(UUID productId, int requiredQuantity) {
+            return true;
+        }
+    }
+
+    private static final class NeverAvailableStockPort implements StockAvailabilityPort {
+        @Override
+        public boolean isStockAvailable(UUID productId, int requiredQuantity) {
+            return false;
+        }
+    }
+
     /** A minimal fake satisfying the OrderRepository port, backed by a Map instead of a database. */
     private static final class InMemoryOrderRepository implements OrderRepository {
-        private final Map<OrderId, Order> store = new HashMap<>();
+        final Map<OrderId, Order> store = new HashMap<>();
 
         @Override
         public Order save(Order order) {

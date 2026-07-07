@@ -33,3 +33,28 @@ management:
     web:
       exposure:
         include: health, info
+  health:
+    circuitbreakers:
+      enabled: true
+
+app:
+  inventory-service:
+    base-url: http://localhost:8082
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventoryService:
+        # After 5 calls, open the circuit if >= 50% fail.
+        sliding-window-size: 5
+        failure-rate-threshold: 50
+        # Stay open for 10s before moving to HALF_OPEN.
+        wait-duration-in-open-state: 10s
+        # Send 2 test calls in HALF_OPEN before deciding to close.
+        permitted-number-of-calls-in-half-open-state: 2
+        register-health-indicator: true
+        # 404 (unknown product) is not a circuit-breaker-worthy failure —
+        # it's a valid response. Only network/timeout errors should count.
+        record-exceptions:
+          - org.springframework.web.client.ResourceAccessException
+          - java.util.concurrent.TimeoutException
