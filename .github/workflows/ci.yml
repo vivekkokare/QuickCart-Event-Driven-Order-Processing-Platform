@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Test ${{ matrix.service }}
+    runs-on: ubuntu-latest
+
+    # Both services are tested in parallel via a matrix — one runner per
+    # service. This halves CI wall-clock time compared to running them
+    # sequentially, and the two services have no compile-time dependency
+    # on each other so parallelism is safe.
+    strategy:
+      matrix:
+        service: [ order-service, inventory-service ]
+      # Don't cancel the other matrix leg if one fails — we want to see
+      # all failures in one CI run rather than discovering them serially.
+      fail-fast: false
+
+    # Services spin up Docker containers on the runner for the Spring Boot
+    # smoke test (@SpringBootTest) which needs a live Postgres and RabbitMQ.
+    # Unit tests (domain + application layer) don't need any of these.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: order_admin
+          POSTGRES_PASSWORD: order_admin_pw
+          POSTGRES_DB: order_system
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:3.13-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: order_admin
+          RABBITMQ_DEFAULT_PASS: order_admin_pw
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          # Cache Maven's local repository (~/.m2) between runs keyed on
+          # the pom.xml hash. A cache hit skips downloading ~200MB of
+          # dependencies — first run ~2min, subsequent runs ~30s.
+          cache: maven
+
+      # inventory-service's smoke test needs a second database. The
+      # postgres service above creates order_system; we add inventory_system
+      # here. Only runs for the inventory-service matrix leg.
+      - name: Create inventory_system database
+        if: matrix.service == 'inventory-service'
+        run: |
+          PGPASSWORD=order_admin_pw psql -h localhost -U order_admin -d order_system \
+            -c "CREATE DATABASE inventory_system OWNER order_admin;"
+
+      - name: Run tests
+        working-directory: ${{ matrix.service }}
+        run: ./mvnw -q clean test
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-${{ matrix.service }}
+          path: ${{ matrix.service }}/target/surefire-reports/
+          retention-days: 7
