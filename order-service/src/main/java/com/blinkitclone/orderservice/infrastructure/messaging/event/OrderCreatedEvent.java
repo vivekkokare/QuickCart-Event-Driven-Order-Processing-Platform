@@ -18,8 +18,12 @@ import java.util.UUID;
  * <p>Versioning note: any backwards-incompatible change to this shape (field
  * removed/retyped) requires a new routing key (e.g. "order.created.v2") so
  * consumers can migrate independently rather than breaking on deploy.
+ *
+ * <p>eventId is the outbox row's own id (see infrastructure.outbox) and
+ * doubles as the idempotency key consumers use to detect redelivery.
  */
 public record OrderCreatedEvent(
+        UUID eventId,
         UUID orderId,
         UUID customerId,
         List<OrderItemPayload> items,

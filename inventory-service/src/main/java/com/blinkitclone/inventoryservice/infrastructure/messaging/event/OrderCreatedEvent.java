@@ -15,8 +15,12 @@ import java.util.UUID;
  * future schema growth (adding a field is non-breaking).
  *
  * <p>Exchange: "order.events" (topic) | Routing key: "order.created"
+ *
+ * <p>eventId is the idempotency key used by OrderCreatedEventListener to
+ * detect and skip redelivered messages (see infrastructure.idempotency).
  */
 public record OrderCreatedEvent(
+        UUID eventId,
         UUID orderId,
         UUID customerId,
         List<OrderItemPayload> items,

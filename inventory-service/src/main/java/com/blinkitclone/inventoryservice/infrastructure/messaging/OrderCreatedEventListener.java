@@ -18,11 +18,11 @@ import org.springframework.stereotype.Component;
  * input-port abstraction: the use case has no idea whether it was triggered
  * by a REST call or a queue message.
  *
- * <p>Idempotency gap, deferred to Phase 3: if this message is redelivered
- * (e.g. after a broker restart before the ack lands), reserveStock runs
- * again and may double-decrement stock. The fix is an idempotency table
- * keyed by orderId, checked before processing - intentionally not built yet
- * to keep this phase focused on the base publish/consume wiring.
+ * <p>Redelivery safety: if this message is redelivered (broker restart
+ * before the ack lands, or a retry after a transient failure - see
+ * RabbitMqConfig's retry/DLQ setup), ReserveStockService's idempotency check
+ * against ProcessedEventStore means a duplicate delivery is a guaranteed
+ * no-op rather than a double-decrement.
  */
 @Component
 public class OrderCreatedEventListener {
@@ -35,7 +35,9 @@ public class OrderCreatedEventListener {
         this.reserveStockUseCase = reserveStockUseCase;
     }
 
-    @RabbitListener(queues = RabbitMqConfig.STOCK_RESERVATION_QUEUE)
+    @RabbitListener(
+            queues = RabbitMqConfig.STOCK_RESERVATION_QUEUE,
+            containerFactory = "retryRabbitListenerContainerFactory")
     public void onOrderCreated(OrderCreatedEvent event) {
         log.info("Received OrderCreated for order {}", event.orderId());
 
@@ -43,7 +45,8 @@ public class OrderCreatedEventListener {
                 .map(item -> new ReservationItem(item.productId(), item.quantity()))
                 .toList();
 
-        ReservationResult result = reserveStockUseCase.reserveStock(new ReserveStockCommand(event.orderId(), items));
+        ReservationResult result = reserveStockUseCase.reserveStock(
+                new ReserveStockCommand(event.eventId(), event.orderId(), items));
 
         if (result.reserved()) {
             log.info("Stock reserved for order {}", event.orderId());

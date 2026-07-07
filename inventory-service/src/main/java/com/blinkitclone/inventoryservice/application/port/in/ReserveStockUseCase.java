@@ -16,7 +16,7 @@ public interface ReserveStockUseCase {
 
     ReservationResult reserveStock(ReserveStockCommand command);
 
-    record ReserveStockCommand(UUID orderId, List<ReservationItem> items) {
+    record ReserveStockCommand(UUID eventId, UUID orderId, List<ReservationItem> items) {
 
         public record ReservationItem(UUID productId, int quantity) {
         }

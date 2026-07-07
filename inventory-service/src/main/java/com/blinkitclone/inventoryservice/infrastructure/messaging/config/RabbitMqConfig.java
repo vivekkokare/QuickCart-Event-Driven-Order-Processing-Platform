@@ -1,25 +1,39 @@
 package com.blinkitclone.inventoryservice.infrastructure.messaging.config;
 
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.rabbit.retry.RejectAndDontRequeueRecoverer;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.amqp.rabbit.config.RetryInterceptorBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.retry.interceptor.RetryOperationsInterceptor;
+import org.springframework.retry.policy.SimpleRetryPolicy;
+import org.springframework.retry.support.RetryTemplate;
+
+import java.util.Map;
 
 /**
- * inventory-service declares the exchange it depends on defensively (with
- * identical properties to order-service's declaration) so this service can
- * start up cleanly and bind its queue even if it comes up before
- * order-service ever has. RabbitMQ exchange/queue declarations are
- * idempotent as long as both declarations agree on the arguments - if they
- * ever disagree, the broker rejects the second declaration loudly at
- * startup, which is a deliberate fail-fast rather than a silent mismatch.
+ * Declares the full messaging topology, including the dead-letter path that
+ * was an explicitly documented gap after Phase 2.
  *
- * <p>Known gap, deferred to Phase 3: there is no dead-letter queue configured
- * yet. As-is, if OrderCreatedEventListener throws, Spring AMQP's default
- * behaviour requeues the message and it is redelivered indefinitely - a
- * "poison message" can loop forever and starve the queue. Phase 3 adds a
- * dead-letter exchange/queue plus a bounded retry policy to fix this.
+ * <p>How a poison message is handled end-to-end:
+ * <ol>
+ *   <li>OrderCreatedEventListener throws (e.g. a transient DB outage).</li>
+ *   <li>retryRabbitListenerContainerFactory's interceptor retries the
+ *       delivery in-process up to 3 times with a fixed backoff - no
+ *       redelivery from the broker involved yet, this is local retry.</li>
+ *   <li>If all 3 attempts fail, RejectAndDontRequeueRecoverer rejects the
+ *       message (basic.reject, requeue=false) instead of letting the
+ *       exception propagate back to the broker as a requeue.</li>
+ *   <li>Because stockReservationQueue declares
+ *       x-dead-letter-exchange/x-dead-letter-routing-key, RabbitMQ
+ *       automatically routes the rejected message to the DLX, which lands
+ *       it in stockReservationDlq for manual inspection/replay - instead of
+ *       redelivering forever and starving the queue.</li>
+ * </ol>
  */
 @Configuration
 public class RabbitMqConfig {
@@ -28,14 +42,30 @@ public class RabbitMqConfig {
     public static final String ORDER_CREATED_ROUTING_KEY = "order.created";
     public static final String STOCK_RESERVATION_QUEUE = "inventory.order-created.queue";
 
+    public static final String DEAD_LETTER_EXCHANGE = "order.events.dlx";
+    public static final String DEAD_LETTER_ROUTING_KEY = "order.created.dead";
+    public static final String STOCK_RESERVATION_DLQ = "inventory.order-created.dlq";
+
     @Bean
     public TopicExchange orderEventsExchange() {
         return new TopicExchange(ORDER_EVENTS_EXCHANGE, true, false);
     }
 
     @Bean
+    public DirectExchange deadLetterExchange() {
+        return new DirectExchange(DEAD_LETTER_EXCHANGE, true, false);
+    }
+
+    @Bean
     public Queue stockReservationQueue() {
-        return new Queue(STOCK_RESERVATION_QUEUE, true);
+        return new Queue(STOCK_RESERVATION_QUEUE, true, false, false, Map.of(
+                "x-dead-letter-exchange", DEAD_LETTER_EXCHANGE,
+                "x-dead-letter-routing-key", DEAD_LETTER_ROUTING_KEY));
+    }
+
+    @Bean
+    public Queue stockReservationDlq() {
+        return new Queue(STOCK_RESERVATION_DLQ, true);
     }
 
     @Bean
@@ -44,7 +74,44 @@ public class RabbitMqConfig {
     }
 
     @Bean
+    public Binding stockReservationDlqBinding(Queue stockReservationDlq, DirectExchange deadLetterExchange) {
+        return BindingBuilder.bind(stockReservationDlq).to(deadLetterExchange).with(DEAD_LETTER_ROUTING_KEY);
+    }
+
+    @Bean
     public MessageConverter jsonMessageConverter() {
         return new Jackson2JsonMessageConverter();
+    }
+
+    /**
+     * Bounded local retry (3 attempts, 1s fixed backoff) before a message is
+     * rejected to the DLQ. Stateless retry is correct here because
+     * ReserveStockService's idempotency check makes re-running the same
+     * message safe - there is no in-memory state from attempt 1 that attempt
+     * 2 needs to see.
+     */
+    @Bean
+    public SimpleRabbitListenerContainerFactory retryRabbitListenerContainerFactory(
+            ConnectionFactory connectionFactory, MessageConverter jsonMessageConverter) {
+        SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+        factory.setConnectionFactory(connectionFactory);
+        factory.setMessageConverter(jsonMessageConverter);
+        factory.setAdviceChain(retryInterceptor());
+        return factory;
+    }
+
+    private RetryOperationsInterceptor retryInterceptor() {
+        RetryTemplate retryTemplate = new RetryTemplate();
+        retryTemplate.setRetryPolicy(new SimpleRetryPolicy(3));
+
+        org.springframework.retry.backoff.FixedBackOffPolicy backOffPolicy =
+                new org.springframework.retry.backoff.FixedBackOffPolicy();
+        backOffPolicy.setBackOffPeriod(1000);
+        retryTemplate.setBackOffPolicy(backOffPolicy);
+
+        return RetryInterceptorBuilder.stateless()
+                .retryOperations(retryTemplate)
+                .recoverer(new RejectAndDontRequeueRecoverer())
+                .build();
     }
 }

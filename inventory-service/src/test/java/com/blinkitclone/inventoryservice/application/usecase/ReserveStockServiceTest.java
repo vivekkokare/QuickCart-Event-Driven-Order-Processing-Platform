@@ -3,6 +3,7 @@ package com.blinkitclone.inventoryservice.application.usecase;
 import com.blinkitclone.inventoryservice.application.port.in.ReserveStockUseCase.ReserveStockCommand;
 import com.blinkitclone.inventoryservice.application.port.in.ReserveStockUseCase.ReserveStockCommand.ReservationItem;
 import com.blinkitclone.inventoryservice.application.port.in.ReserveStockUseCase.ReservationResult;
+import com.blinkitclone.inventoryservice.application.port.out.ProcessedEventStore;
 import com.blinkitclone.inventoryservice.application.port.out.StockRepository;
 import com.blinkitclone.inventoryservice.domain.model.Stock;
 import org.junit.jupiter.api.BeforeEach;
@@ -10,9 +11,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,7 +30,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ReserveStockServiceTest {
 
     private final InMemoryStockRepository repository = new InMemoryStockRepository();
-    private final ReserveStockService service = new ReserveStockService(repository);
+    private final InMemoryProcessedEventStore processedEventStore = new InMemoryProcessedEventStore();
+    private final ReserveStockService service = new ReserveStockService(repository, processedEventStore);
 
     private UUID milkId;
     private UUID breadId;
@@ -42,7 +46,7 @@ class ReserveStockServiceTest {
 
     @Test
     void reservesStockWhenAllItemsHaveSufficientQuantity() {
-        ReserveStockCommand command = new ReserveStockCommand(UUID.randomUUID(), List.of(
+        ReserveStockCommand command = new ReserveStockCommand(UUID.randomUUID(), UUID.randomUUID(), List.of(
                 new ReservationItem(milkId, 3),
                 new ReservationItem(breadId, 1)
         ));
@@ -56,7 +60,7 @@ class ReserveStockServiceTest {
 
     @Test
     void rejectsWithoutMutatingAnyStockWhenOneItemIsInsufficient() {
-        ReserveStockCommand command = new ReserveStockCommand(UUID.randomUUID(), List.of(
+        ReserveStockCommand command = new ReserveStockCommand(UUID.randomUUID(), UUID.randomUUID(), List.of(
                 new ReservationItem(milkId, 3),
                 new ReservationItem(breadId, 5) // only 2 available
         ));
@@ -70,7 +74,7 @@ class ReserveStockServiceTest {
 
     @Test
     void rejectsForUnknownProduct() {
-        ReserveStockCommand command = new ReserveStockCommand(UUID.randomUUID(), List.of(
+        ReserveStockCommand command = new ReserveStockCommand(UUID.randomUUID(), UUID.randomUUID(), List.of(
                 new ReservationItem(UUID.randomUUID(), 1)
         ));
 
@@ -78,6 +82,20 @@ class ReserveStockServiceTest {
 
         assertThat(result.reserved()).isFalse();
         assertThat(result.reason()).contains("Unknown product");
+    }
+
+    @Test
+    void redeliveredEventIsANoOpAndDoesNotDoubleDecrementStock() {
+        UUID eventId = UUID.randomUUID();
+        ReserveStockCommand command = new ReserveStockCommand(eventId, UUID.randomUUID(), List.of(
+                new ReservationItem(milkId, 3)
+        ));
+
+        service.reserveStock(command);
+        ReservationResult secondDelivery = service.reserveStock(command);
+
+        assertThat(secondDelivery.reserved()).isTrue();
+        assertThat(repository.findByProductId(milkId).orElseThrow().availableQuantity()).isEqualTo(7);
     }
 
     private static final class InMemoryStockRepository implements StockRepository {
@@ -110,6 +128,20 @@ class ReserveStockServiceTest {
         public List<Stock> saveAll(List<Stock> stocks) {
             stocks.forEach(this::save);
             return stocks;
+        }
+    }
+
+    private static final class InMemoryProcessedEventStore implements ProcessedEventStore {
+        private final Set<UUID> processed = new HashSet<>();
+
+        @Override
+        public boolean alreadyProcessed(UUID eventId) {
+            return processed.contains(eventId);
+        }
+
+        @Override
+        public void markProcessed(UUID eventId) {
+            processed.add(eventId);
         }
     }
 }

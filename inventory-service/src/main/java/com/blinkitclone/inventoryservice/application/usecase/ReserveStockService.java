@@ -1,6 +1,7 @@
 package com.blinkitclone.inventoryservice.application.usecase;
 
 import com.blinkitclone.inventoryservice.application.port.in.ReserveStockUseCase;
+import com.blinkitclone.inventoryservice.application.port.out.ProcessedEventStore;
 import com.blinkitclone.inventoryservice.application.port.out.StockRepository;
 import com.blinkitclone.inventoryservice.domain.exception.InsufficientStockException;
 import com.blinkitclone.inventoryservice.domain.model.Stock;
@@ -26,14 +27,23 @@ import java.util.function.Function;
 public class ReserveStockService implements ReserveStockUseCase {
 
     private final StockRepository stockRepository;
+    private final ProcessedEventStore processedEventStore;
 
-    public ReserveStockService(StockRepository stockRepository) {
+    public ReserveStockService(StockRepository stockRepository, ProcessedEventStore processedEventStore) {
         this.stockRepository = stockRepository;
+        this.processedEventStore = processedEventStore;
     }
 
     @Override
     @Transactional
     public ReservationResult reserveStock(ReserveStockCommand command) {
+        // Idempotency check and the stock mutation below happen in the same transaction,
+        // so "reserved stock" and "marked this event processed" can never disagree -
+        // a redelivered message is a guaranteed no-op, not a race.
+        if (processedEventStore.alreadyProcessed(command.eventId())) {
+            return ReservationResult.success(command.orderId());
+        }
+
         List<UUID> productIds = command.items().stream().map(ReserveStockCommand.ReservationItem::productId).toList();
 
         Map<UUID, Stock> stocksByProduct = stockRepository.findAllByProductIdIn(productIds).stream()
@@ -62,6 +72,7 @@ public class ReserveStockService implements ReserveStockUseCase {
         }
 
         stockRepository.saveAll(List.copyOf(stocksByProduct.values()));
+        processedEventStore.markProcessed(command.eventId());
         return ReservationResult.success(command.orderId());
     }
 }
