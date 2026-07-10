@@ -23,7 +23,8 @@ WORKDIR /app
 
 # Run as non-root — a container running as root has write access to the
 # entire container filesystem, which amplifies the impact of any exploit.
-RUN addgroup -S spring && adduser -S spring -G spring
+RUN apk add --no-cache curl && \
+    addgroup -S spring && adduser -S spring -G spring
 USER spring
 
 COPY --from=builder /build/target/*.jar app.jar

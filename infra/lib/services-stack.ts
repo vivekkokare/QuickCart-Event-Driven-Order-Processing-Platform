@@ -123,6 +123,7 @@ export class ServicesStack extends cdk.Stack {
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(5),
         retries: 3,
+        startPeriod: cdk.Duration.seconds(120),
       },
     });
 
@@ -205,6 +206,7 @@ export class ServicesStack extends cdk.Stack {
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(5),
         retries: 3,
+        startPeriod: cdk.Duration.seconds(120),
       },
     });
 

@@ -12,7 +12,8 @@ RUN ./mvnw -q package -DskipTests -B
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 
-RUN addgroup -S spring && adduser -S spring -G spring
+RUN apk add --no-cache curl && \
+    addgroup -S spring && adduser -S spring -G spring
 USER spring
 
 COPY --from=builder /build/target/*.jar app.jar
