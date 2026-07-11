@@ -1,77 +1,117 @@
-# Blinkit-Inspired Order Processing System
+# QuickCart — Event-Driven Order Processing Platform
 
-A production-style, microservices-based order processing platform built to demonstrate
-backend engineering depth: clean architecture, SOLID design, event-driven communication,
-resilience patterns, and cloud deployment.
+A microservices-based order processing backend modelled on quick-commerce platforms like Blinkit. Built with Java 17, Spring Boot 3, PostgreSQL, RabbitMQ, and Redis — deployed to AWS with ECS Fargate, CDK, and a GitHub Actions CI/CD pipeline.
 
-## Why this project exists
+## Services
 
-This is a portfolio project built to be discussed in depth in Java Backend Engineer
-interviews. Every architectural decision below is intentional and documented so it can be
-defended, not just demoed.
+| Service | Port | Responsibility |
+|---|---|---|
+| `order-service` | 8081 | Accepts orders, validates stock, publishes `OrderCreated` events |
+| `inventory-service` | 8082 | Consumes events, manages stock levels, exposes stock query API |
 
-## System vision
+## Architecture
 
-Model the core order lifecycle of a quick-commerce platform (like Blinkit/Zepto):
+Both services follow Clean Architecture (domain → application → infrastructure → api). The domain layer has no framework dependencies — it can be tested without Spring, JPA, or a message broker.
 
-1. Customer places an order → `order-service`
-2. Order triggers a stock reservation check → `inventory-service` (via RabbitMQ event)
-3. (Later) Payment is authorized → `payment-service`
-4. (Later) Customer is notified → `notification-service`
-5. (Later) All requests enter through `api-gateway`
+Inter-service communication is split into two channels:
 
-## Why microservices from day one (and the trade-off we accepted)
+- **Synchronous (HTTP):** order-service calls inventory-service for a pre-flight stock check before accepting an order. This path is protected by a Resilience4j circuit breaker with an optimistic fallback — if inventory-service is unreachable, the order is accepted and the definitive check happens downstream.
 
-Most teams start with a modular monolith and extract services once boundaries are proven —
-that's the lower-risk path. We deliberately chose microservices from day one instead,
-accepting more upfront plumbing (inter-service contracts, eventual consistency, distributed
-debugging) in exchange for hands-on experience with the patterns that actually come up in
-microservices interviews: event-driven communication, idempotency, sagas, and resilience.
+- **Asynchronous (RabbitMQ):** after persisting an order, order-service writes an `OrderCreated` event to an outbox table in the same database transaction. A poller publishes it to RabbitMQ. inventory-service consumes it, checks real stock levels, and deducts.
 
-To keep this tractable, we are **not** starting with 6 services. We start with exactly two
-(`order-service`, `inventory-service`) talking over RabbitMQ, and only add new services once
-the core pattern — domain logic, use cases, event publish/consume, persistence — is proven
-and repeatable. Scope is added in phases (see `/docs/ROADMAP.md`).
+### Reliability
 
-## Why a monorepo (for now)
+**Transactional Outbox** — the order row and the outbox event are written in one ACID transaction. The broker write is decoupled and retried independently, so there is no window where an order exists without an event being eventually published.
 
-All services live in one Git repository during early development. This is a deliberate,
-revisitable choice:
+**Idempotent Consumer** — inventory-service records processed event IDs in a `processed_events` table. Redelivered messages (broker restart, consumer crash) are silently discarded. The idempotency check and the stock deduction happen in the same transaction.
 
-- **Pro:** one PR can change a producer and consumer event contract together; one
-  `docker-compose.yml` boots the whole local environment; no premature ceremony of separate
-  CI pipelines/versioning before there's stable code to version.
-- **Con:** in a real org, independent deploy cadence and independent ownership usually push
-  teams toward polyrepo. We will discuss this trade-off explicitly in `/docs` once we reach
-  the CI/CD phase, and it's a great interview talking point either way.
+**Dead Letter Queue** — messages that fail processing after retries are routed to a DLQ for inspection and replay.
 
-## Repository structure
+### Caching
 
-```
-ORDER/
-├── order-service/        Spring Boot service — order lifecycle (Clean Architecture)
-├── inventory-service/    Spring Boot service — stock reservation (Clean Architecture)
-├── infra/                Local infra config (Postgres init scripts, RabbitMQ defs, etc.)
-├── docs/                 Architecture decisions, roadmap, diagrams
-├── docker-compose.yml     Local dev infra: Postgres, RabbitMQ, Redis
-└── README.md
-```
+inventory-service caches stock by `productId` in Redis using a decorator over the JPA repository (`CachingStockRepository` wraps `StockRepositoryAdapter`). The domain model carries no Jackson or cache annotations. TTL is 5 minutes; the cache is evicted on every stock write.
 
-## Local infrastructure
+## Tech Stack
 
-Run the shared infra (Postgres, RabbitMQ, Redis) with:
+- **Java 17**, **Spring Boot 3.5**, **Spring Data JPA**, **Spring AMQP**
+- **PostgreSQL 16** — one database per service
+- **RabbitMQ** — topic exchange, DLX/DLQ per queue
+- **Redis** — stock cache
+- **Resilience4j** — circuit breaker on the inventory HTTP call
+- **Docker** — multi-stage builds (JDK builder → JRE runtime, non-root user)
+- **AWS** — ECS Fargate, RDS, Amazon MQ, ElastiCache, ALB, Secrets Manager
+- **AWS CDK (TypeScript)** — three-stack infrastructure (Network → Data → Services)
+- **GitHub Actions** — CI (test matrix across both services) + CD (build, push to ECR, deploy to ECS)
+
+## Running Locally
+
+Start the shared infrastructure:
 
 ```bash
 docker compose up -d
 ```
 
-| Service    | Port(s)        | Notes                                   |
-|------------|-----------------|------------------------------------------|
-| PostgreSQL | 5432            | user: `order_admin` / db: `order_system` |
-| RabbitMQ   | 5672, 15672     | Management UI at http://localhost:15672  |
-| Redis      | 6379            | No auth in local dev                     |
+| Service | Port | Notes |
+|---|---|---|
+| PostgreSQL | 5432 | `order_admin` / databases: `order_system`, `inventory_system` |
+| RabbitMQ | 5672, 15672 | Management UI: http://localhost:15672 (guest/guest) |
+| Redis | 6379 | No auth |
 
-## Roadmap
+Run each service from its directory:
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full phased plan from setup to AWS
-deployment.
+```bash
+cd order-service && ./mvnw spring-boot:run
+cd inventory-service && ./mvnw spring-boot:run
+```
+
+Place an order:
+
+```bash
+curl -s -X POST http://localhost:8081/api/v1/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerId": "550e8400-e29b-41d4-a716-446655440000",
+    "items": [{
+      "productId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "productName": "Milk",
+      "quantity": 2,
+      "unitPrice": 1.99
+    }]
+  }'
+```
+
+## Running Tests
+
+```bash
+cd order-service && ./mvnw test
+cd inventory-service && ./mvnw test
+```
+
+Tests use real PostgreSQL and RabbitMQ via Testcontainers — no mocks on the infrastructure boundary.
+
+## AWS Deployment
+
+Infrastructure is defined in `/infra` using AWS CDK (TypeScript). Three stacks:
+
+- `QuickCart-Network` — VPC, subnets (public / private / isolated), security groups
+- `QuickCart-Data` — RDS Postgres × 2, Amazon MQ (RabbitMQ), ElastiCache Redis
+- `QuickCart-Services` — ECR repos, ECS cluster, Fargate services, ALB
+
+```bash
+cd infra
+npm install
+cdk deploy --all
+```
+
+CD is handled by GitHub Actions. On push to `master`, the pipeline builds both services, pushes Docker images to ECR, and calls `ecs update-service --force-new-deployment`. OIDC-based authentication — no long-lived AWS credentials in GitHub.
+
+## Repository Structure
+
+```
+├── order-service/          Spring Boot — order lifecycle
+├── inventory-service/      Spring Boot — stock management
+├── infra/                  AWS CDK infrastructure (TypeScript)
+├── docs/decisions/         Architecture decision records
+├── docker-compose.yml      Local dev infrastructure
+└── README.md
+```
